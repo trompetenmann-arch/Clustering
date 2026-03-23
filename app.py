@@ -18,6 +18,9 @@ except Exception:  # BERTopic optional fallback
 
 st.set_page_config(page_title="Message Topic Analyzer", layout="wide")
 
+# Cleanup legacy session keys from older app versions
+st.session_state.pop("first_messages", None)
+
 REQUIRED_COLS = ["user_id", "prompt_text"]
 
 
@@ -272,7 +275,6 @@ if uploaded is not None:
             )
 
             st.session_state["clean"] = clean
-            st.session_state["first_messages"] = first_messages
             st.session_state["clustered"] = clustered
             st.session_state["cluster_summary"] = cluster_summary
             st.session_state["reps"] = reps_meta
