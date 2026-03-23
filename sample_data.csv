@@ -1,0 +1,13 @@
+user_id,timestamp,prompt_text,session,treatment_arm,grade,problem_id,response_text,conversation_id
+u1,2026-03-20T08:01:00,"Kannst du mir den ersten Schritt erklären?",s1,A,8,p1,,c1
+u1,2026-03-20T08:05:00,"Bitte gib mir direkt die Lösung",s1,A,8,p1,,c1
+u1,2026-03-21T09:15:00,"Ich glaube das Ergebnis ist 42, stimmt das?",s2,A,8,p2,,c2
+u2,2026-03-20T10:30:00,"Was ist die Formel für lineare Funktionen?",s1,B,9,p3,,c3
+u2,2026-03-20T10:34:00,"Der Aufgabentext lautet: Bestimme die Steigung...",s1,B,9,p3,,c3
+u2,2026-03-22T11:12:00,"Hilf mir, einen Plan zu machen, wie ich beginne",s2,B,9,p4,,c4
+u3,2026-03-21T12:00:00,"Bitte nur einen Hinweis, keine komplette Lösung",s1,A,10,p2,,c5
+u3,2026-03-21T12:03:00,"Ich versuche erst mal die Gleichung umzustellen",s1,A,10,p2,,c5
+u3,2026-03-22T12:10:00,"Kannst du meine Schritte kontrollieren?",s2,A,10,p5,,c6
+u4,2026-03-22T14:20:00,"Gib mir mehrere Wege zur Lösung",s1,C,11,p6,,c7
+u4,2026-03-22T14:25:00,"Warum funktioniert mein Ansatz nicht?",s1,C,11,p6,,c7
+u5,2026-03-23T07:50:00,"Erkläre es mir wie für Anfänger",s1,B,7,p7,,c8
