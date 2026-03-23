@@ -1,37 +1,32 @@
 # Message Topic Analyzer
 
-Lokale Streamlit-App zur **zweistufigen BERT-basierten Topic-Clustering-Analyse** von Schülernachrichten.
+Lokale Streamlit-App zur **BERT-basierten Clusteranalyse von User-Prompts**.
 
-## Was wurde umgesetzt?
+## Fokus der App
 
-Die App implementiert jetzt das beschriebene Vorgehen:
+Die App ist jetzt bewusst reduziert auf CSV-Dateien mit nur zwei relevanten Feldern:
 
-1. **First-message Selektion je Schüler und Problem**
-   - Pro Kombination aus `session`, `treatment_arm`, `grade`, `problem_id`, `user_id` wird nur die **erste Nachricht** verwendet.
-2. **Problem-spezifisches Clustering**
-   - Sentence-BERT Embeddings
-   - UMAP zur Dimensionsreduktion
-   - HDBSCAN (mind. 2 Nachrichten pro Cluster)
-   - optional BERTopic (falls verfügbar)
-3. **c-TF-IDF je Cluster**
-   - Jede Cluster-Nachrichtenmenge wird als ein Dokument behandelt.
-   - Top-Terme und **Top-3 repräsentative Nachrichten** werden extrahiert.
-4. **Meta-Clustering**
-   - Repräsentative Cluster-Nachrichten werden problemübergreifend erneut geclustert.
-   - Mindestgröße: 5 Cluster pro Meta-Cluster.
-   - c-TF-IDF und **Top-1 Meta-repräsentative Nachricht**.
-5. **Manuelles Labeling**
-   - Meta-Cluster können im UI mit `message_type` gelabelt werden.
-   - Zusätzlich `superficial_flag` (z. B. superficial / nicht-superficial).
-6. **Session-Visualisierung**
-   - Anteil erster Nachrichten nach superficial-Kategorie je Session/Treatment.
+- `user_id`
+- `prompt_text`
+
+Alle Prompts eines Users werden berücksichtigt (keine Problem-/Session-Filterung erforderlich).
+
+## Workflow
+
+1. Bereinigung der Prompt-Texte (Whitespace, optional lowercase, optional Entfernen leerer Prompts)
+2. Clustering über **alle Prompts** mit Sentence-BERT + UMAP + HDBSCAN (optional BERTopic)
+3. c-TF-IDF-Auswertung pro Cluster mit Top-Termen und Top-3 repräsentativen Nachrichten
+4. Optionales Meta-Clustering der Cluster-Repräsentanten
+5. Manuelles Labeling der Meta-Cluster (`message_type`, `superficial_flag`)
+6. CSV/JSON-Export
 
 ## Features
 
-- CSV-Upload + flexible Spaltenzuordnung
-- Interaktive Plotly-Visualisierungen (Problem-Cluster und Meta-Cluster)
-- Editierbares Meta-Cluster-Labeling
-- CSV- und JSON-Export aller Stufen
+- CSV-Upload + einfache Spaltenzuordnung nur für `user_id` und `prompt_text`
+- Interaktive UMAP-Visualisierungen für Cluster und Meta-Cluster
+- Repräsentative Nachrichten pro Cluster
+- Editierbares Meta-Labeling
+- Export aller zentralen Ergebnistabellen
 
 ## Projektstruktur
 
@@ -54,23 +49,6 @@ streamlit run app.py
 ```
 
 Danach läuft die App lokal (typisch `http://localhost:8501`).
-
-## Datenformat
-
-Erforderlich:
-
-- `user_id`
-- `timestamp`
-- `prompt_text`
-
-Optional (empfohlen für die beschriebene Methodik):
-
-- `session`
-- `treatment_arm`
-- `grade`
-- `problem_id`
-- `response_text`
-- `conversation_id`
 
 ## Hinweis
 
