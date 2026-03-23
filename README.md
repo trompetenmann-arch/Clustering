@@ -1,26 +1,37 @@
-# Prompt Profile Analyzer
+# Message Topic Analyzer
 
-Lokale, browserbasierte Streamlit-App zur Analyse von Prompt-Daten aus CSV-Dateien.
+Lokale Streamlit-App zur **zweistufigen BERT-basierten Topic-Clustering-Analyse** von Schülernachrichten.
+
+## Was wurde umgesetzt?
+
+Die App implementiert jetzt das beschriebene Vorgehen:
+
+1. **First-message Selektion je Schüler und Problem**
+   - Pro Kombination aus `session`, `treatment_arm`, `grade`, `problem_id`, `user_id` wird nur die **erste Nachricht** verwendet.
+2. **Problem-spezifisches Clustering**
+   - Sentence-BERT Embeddings
+   - UMAP zur Dimensionsreduktion
+   - HDBSCAN (mind. 2 Nachrichten pro Cluster)
+   - optional BERTopic (falls verfügbar)
+3. **c-TF-IDF je Cluster**
+   - Jede Cluster-Nachrichtenmenge wird als ein Dokument behandelt.
+   - Top-Terme und **Top-3 repräsentative Nachrichten** werden extrahiert.
+4. **Meta-Clustering**
+   - Repräsentative Cluster-Nachrichten werden problemübergreifend erneut geclustert.
+   - Mindestgröße: 5 Cluster pro Meta-Cluster.
+   - c-TF-IDF und **Top-1 Meta-repräsentative Nachricht**.
+5. **Manuelles Labeling**
+   - Meta-Cluster können im UI mit `message_type` gelabelt werden.
+   - Zusätzlich `superficial_flag` (z. B. superficial / nicht-superficial).
+6. **Session-Visualisierung**
+   - Anteil erster Nachrichten nach superficial-Kategorie je Session/Treatment.
 
 ## Features
 
-- CSV-Upload (Dateiauswahl) mit Datenvorschau
-- Flexible Spaltenzuordnung (`user_id`, `timestamp`, `prompt_text` + optionale Felder)
-- Datenbereinigung (Whitespace, optional lower-case, Mindestlänge)
-- Semantisches Clustering einzelner Prompts mit:
-  - `sentence-transformers` Embeddings
-  - `UMAP` Reduktion
-  - `HDBSCAN` Clustering
-  - optional BERTopic-Workflow mit Fallback
-- User-Profiling auf Basis von Clusterverteilungen:
-  - absolute/relative Clusterhäufigkeiten
-  - dominante Cluster
-  - Entropie/Diversität
-  - durchschnittliche Promptlänge
-- Optionales zweites Clustering auf User-Ebene (User-Typen)
-- Interaktive Visualisierungen mit Plotly
-- Manuelles Labeling der Cluster
-- Export als CSV und JSON
+- CSV-Upload + flexible Spaltenzuordnung
+- Interaktive Plotly-Visualisierungen (Problem-Cluster und Meta-Cluster)
+- Editierbares Meta-Cluster-Labeling
+- CSV- und JSON-Export aller Stufen
 
 ## Projektstruktur
 
@@ -42,17 +53,17 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Die App läuft dann lokal (meist unter `http://localhost:8501`).
+Danach läuft die App lokal (typisch `http://localhost:8501`).
 
 ## Datenformat
 
-Mindestens diese Spalten werden benötigt:
+Erforderlich:
 
 - `user_id`
 - `timestamp`
 - `prompt_text`
 
-Optional:
+Optional (empfohlen für die beschriebene Methodik):
 
 - `session`
 - `treatment_arm`
@@ -61,15 +72,6 @@ Optional:
 - `response_text`
 - `conversation_id`
 
-## Methodik in Kurzform
+## Hinweis
 
-1. Einzelprompts werden bereinigt und eingebettet.
-2. Prompts werden mit UMAP+HDBSCAN semantisch geclustert (optional BERTopic).
-3. Aus Prompt-Clustern wird pro User eine Clusterverteilung abgeleitet.
-4. Daraus entstehen datengetriebene User-Profile und optional User-Typen.
-
-## Hinweise
-
-- Für deutschsprachige Daten ist standardmäßig ein multilinguales Modell voreingestellt.
-- Bei sehr großen Datensätzen kann die Berechnung mehrere Minuten dauern.
-- Falls BERTopic in der Laufzeitumgebung nicht korrekt verfügbar ist, nutzt die App automatisch den Fallback-Workflow.
+Falls BERTopic in der Umgebung nicht verfügbar ist, läuft automatisch der UMAP+HDBSCAN-Workflow weiter.
