@@ -28,7 +28,6 @@ class AnalysisConfig:
     embedding_model: str
     umap_neighbors: int
     umap_components: int
-    min_prompt_length: int
     lower_case: bool
     remove_short: bool
     use_bertopic: bool
@@ -55,7 +54,6 @@ def clean_dataframe(
     df: pd.DataFrame,
     prompt_col: str,
     lower_case: bool,
-    min_len: int,
     remove_short: bool,
 ) -> pd.DataFrame:
     out = df.copy()
@@ -63,10 +61,8 @@ def clean_dataframe(
     out["prompt_text_clean"] = out[prompt_col].fillna("").astype(str).map(normalize_whitespace)
     if lower_case:
         out["prompt_text_clean"] = out["prompt_text_clean"].str.lower()
-    out = out[out["prompt_text_clean"].str.len() > 0]
     if remove_short:
-        out = out[out["prompt_text_clean"].str.len() >= min_len]
-
+        out = out[out["prompt_text_clean"].str.len() > 0]
     out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce")
     for c in OPTIONAL_COLS:
         if c not in out.columns:
@@ -181,6 +177,7 @@ def build_ctfidf_representatives(
     topic_rows = []
     rep_rows = []
 
+    valid = valid.reset_index(drop=True)
     msg_counts = vectorizer.transform(valid[text_col])
     cluster_to_idx = {cid: i for i, cid in enumerate(docs.index.tolist())}
 
@@ -191,7 +188,8 @@ def build_ctfidf_representatives(
         top_terms = ", ".join(terms[top_term_idx])
 
         sub = valid[valid[cluster_col] == cid].copy()
-        sub_counts = msg_counts[sub.index]
+        sub_pos = sub.index.to_numpy()
+        sub_counts = msg_counts[sub_pos]
         term_weights = weights.reshape(-1, 1)
         scores = (sub_counts @ term_weights).ravel()
         sub["rep_score"] = scores
@@ -260,16 +258,14 @@ with st.sidebar:
     embedding_model = st.text_input("Embedding-Modell", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     umap_neighbors = st.slider("UMAP n_neighbors", 2, 100, 15)
     umap_components = st.slider("UMAP n_components", 2, 10, 2)
-    min_prompt_length = st.slider("Mindestlänge Nachricht", 0, 500, 5)
     lower_case = st.checkbox("Kleinschreibung", value=False)
-    remove_short = st.checkbox("Sehr kurze Nachrichten entfernen", value=True)
+    remove_short = st.checkbox("Leere Nachrichten entfernen", value=True)
     use_bertopic = st.checkbox("BERTopic verwenden (wenn verfügbar)", value=True)
 
 config = AnalysisConfig(
     embedding_model=embedding_model,
     umap_neighbors=umap_neighbors,
     umap_components=umap_components,
-    min_prompt_length=min_prompt_length,
     lower_case=lower_case,
     remove_short=remove_short,
     use_bertopic=use_bertopic,
@@ -292,7 +288,7 @@ if uploaded is not None:
     if st.button("Analyse starten", type="primary"):
         try:
             df = ensure_columns(raw, mapping)
-            clean = clean_dataframe(df, "prompt_text", config.lower_case, config.min_prompt_length, config.remove_short)
+            clean = clean_dataframe(df, "prompt_text", config.lower_case, config.remove_short)
             if clean.empty:
                 st.error("Nach Bereinigung sind keine Nachrichten mehr übrig.")
                 st.stop()
