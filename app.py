@@ -271,6 +271,8 @@ if uploaded is not None:
                 top_messages=1,
             )
 
+            st.session_state["clean"] = clean
+            st.session_state["first_messages"] = first_messages
             st.session_state["clustered"] = clustered
             st.session_state["cluster_summary"] = cluster_summary
             st.session_state["reps"] = reps_meta
