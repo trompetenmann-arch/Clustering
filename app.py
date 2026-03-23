@@ -1,29 +1,27 @@
-import io
 import json
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+import hdbscan
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from sklearn.cluster import KMeans
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.preprocessing import StandardScaler
-from sentence_transformers import SentenceTransformer
 import umap
-import hdbscan
+from sentence_transformers import SentenceTransformer
+from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 
 try:
     from bertopic import BERTopic
 except Exception:  # BERTopic optional fallback
     BERTopic = None
 
+st.set_page_config(page_title="Message Topic Analyzer", layout="wide")
 
-st.set_page_config(page_title="Prompt Profile Analyzer", layout="wide")
+# Cleanup legacy session keys from older app versions
+st.session_state.pop("first_messages", None)
 
-REQUIRED_COLS = ["user_id", "timestamp", "prompt_text"]
-OPTIONAL_COLS = ["session", "treatment_arm", "grade", "problem_id", "response_text", "conversation_id"]
+REQUIRED_COLS = ["user_id", "prompt_text"]
 
 
 @dataclass
@@ -31,12 +29,9 @@ class AnalysisConfig:
     embedding_model: str
     umap_neighbors: int
     umap_components: int
-    hdbscan_min_cluster_size: int
-    min_prompt_length: int
     lower_case: bool
-    remove_short: bool
+    remove_empty: bool
     use_bertopic: bool
-    aggregation_mode: str
 
 
 @st.cache_resource(show_spinner=False)
@@ -48,44 +43,23 @@ def normalize_whitespace(text: str) -> str:
     return " ".join(str(text).split())
 
 
-def clean_dataframe(
-    df: pd.DataFrame,
-    prompt_col: str,
-    lower_case: bool,
-    min_len: int,
-    remove_short: bool,
-) -> pd.DataFrame:
+def ensure_columns(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
+    renamed = df.rename(columns={v: k for k, v in mapping.items() if v})
+    for col in REQUIRED_COLS:
+        if col not in renamed.columns:
+            raise ValueError(f"Missing required mapped column: {col}")
+    return renamed
+
+
+def clean_dataframe(df: pd.DataFrame, prompt_col: str, lower_case: bool, remove_empty: bool) -> pd.DataFrame:
     out = df.copy()
     out["prompt_text_original"] = out[prompt_col].astype(str)
     out["prompt_text_clean"] = out[prompt_col].fillna("").astype(str).map(normalize_whitespace)
     if lower_case:
         out["prompt_text_clean"] = out["prompt_text_clean"].str.lower()
-    out = out[out["prompt_text_clean"].str.len() > 0]
-    if remove_short:
-        out = out[out["prompt_text_clean"].str.len() >= min_len]
+    if remove_empty:
+        out = out[out["prompt_text_clean"].str.len() > 0]
     return out.reset_index(drop=True)
-
-
-def aggregate_docs(df: pd.DataFrame, mode: str) -> pd.DataFrame:
-    if mode == "user":
-        group_cols = ["user_id"]
-    elif mode == "user+session" and "session" in df.columns:
-        group_cols = ["user_id", "session"]
-    elif mode == "user+problem" and "problem_id" in df.columns:
-        group_cols = ["user_id", "problem_id"]
-    else:
-        group_cols = ["user_id"]
-
-    agg = (
-        df.groupby(group_cols, dropna=False)
-        .agg(
-            prompt_count=("prompt_text_clean", "size"),
-            agg_text=("prompt_text_clean", lambda x: " ".join(x.tolist())),
-            avg_prompt_len=("prompt_text_clean", lambda x: float(np.mean([len(i) for i in x]))),
-        )
-        .reset_index()
-    )
-    return agg
 
 
 def compute_embeddings(texts: List[str], model_name: str) -> np.ndarray:
@@ -93,29 +67,25 @@ def compute_embeddings(texts: List[str], model_name: str) -> np.ndarray:
     return model.encode(texts, show_progress_bar=False, convert_to_numpy=True)
 
 
-def prompt_clustering(
-    df: pd.DataFrame,
-    config: AnalysisConfig,
-) -> Tuple[pd.DataFrame, np.ndarray, np.ndarray, Optional[object]]:
-    texts = df["prompt_text_clean"].tolist()
+def cluster_texts(texts: List[str], config: AnalysisConfig, min_cluster_size: int) -> Tuple[np.ndarray, np.ndarray]:
     emb = compute_embeddings(texts, config.embedding_model)
 
     reducer = umap.UMAP(
-        n_neighbors=config.umap_neighbors,
-        n_components=config.umap_components,
+        n_neighbors=min(config.umap_neighbors, max(2, len(texts) - 1)),
+        n_components=min(config.umap_components, 2),
         metric="cosine",
         random_state=42,
     )
     emb_umap = reducer.fit_transform(emb)
 
     clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=config.hdbscan_min_cluster_size,
+        min_cluster_size=min_cluster_size,
+        min_samples=1,
         metric="euclidean",
         prediction_data=True,
     )
     labels = clusterer.fit_predict(emb_umap)
 
-    topic_model = None
     if config.use_bertopic and BERTopic is not None:
         try:
             topic_model = BERTopic(
@@ -129,128 +99,137 @@ def prompt_clustering(
             bt_labels, _ = topic_model.fit_transform(texts)
             labels = np.array(bt_labels)
         except Exception:
-            topic_model = None
+            pass
 
+    return labels, emb_umap
+
+
+def cluster_all_prompts(df: pd.DataFrame, config: AnalysisConfig, min_cluster_size: int = 2) -> pd.DataFrame:
     out = df.copy()
+    if len(out) < min_cluster_size:
+        out["cluster_id"] = -1
+        out["umap_x"] = 0.0
+        out["umap_y"] = 0.0
+        return out
+
+    labels, emb_umap = cluster_texts(out["prompt_text_clean"].tolist(), config, min_cluster_size=min_cluster_size)
     out["cluster_id"] = labels
     out["umap_x"] = emb_umap[:, 0]
     out["umap_y"] = emb_umap[:, 1] if emb_umap.shape[1] > 1 else 0.0
-    return out, emb, emb_umap, topic_model
+    return out
 
 
-def extract_top_terms(cluster_df: pd.DataFrame, n_terms: int = 8) -> str:
-    if cluster_df.empty:
-        return ""
-    vectorizer = CountVectorizer(stop_words=None, max_features=2000)
-    X = vectorizer.fit_transform(cluster_df["prompt_text_clean"])
-    counts = np.asarray(X.sum(axis=0)).ravel()
+def build_ctfidf_representatives(
+    df: pd.DataFrame,
+    cluster_col: str,
+    text_col: str,
+    top_messages: int,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    valid = df[df[cluster_col] >= 0].copy()
+    if valid.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    docs = valid.groupby(cluster_col)[text_col].apply(lambda x: " ".join(x.tolist())).sort_index()
+    vectorizer = CountVectorizer(max_features=4000)
+    counts = vectorizer.fit_transform(docs.values)
+    tfidf = TfidfTransformer(norm="l2", use_idf=True).fit_transform(counts)
+
     terms = np.array(vectorizer.get_feature_names_out())
-    top_idx = counts.argsort()[::-1][:n_terms]
-    return ", ".join(terms[top_idx])
+    topic_rows = []
+    rep_rows = []
 
+    valid = valid.reset_index(drop=True)
+    msg_counts = vectorizer.transform(valid[text_col])
+    cluster_to_idx = {cid: i for i, cid in enumerate(docs.index.tolist())}
 
-def build_cluster_summary(df_clustered: pd.DataFrame) -> pd.DataFrame:
-    rows = []
-    for cid, grp in df_clustered.groupby("cluster_id"):
-        examples = grp["prompt_text_original"].head(3).tolist()
-        rows.append(
+    for cid, doc_text in docs.items():
+        row_idx = cluster_to_idx[cid]
+        weights = tfidf[row_idx].toarray().ravel()
+        top_term_idx = weights.argsort()[::-1][:10]
+        top_terms = ", ".join(terms[top_term_idx])
+
+        sub = valid[valid[cluster_col] == cid].copy()
+        sub_pos = sub.index.to_numpy()
+        sub_counts = msg_counts[sub_pos]
+        term_weights = weights.reshape(-1, 1)
+        scores = (sub_counts @ term_weights).ravel()
+        sub["rep_score"] = scores
+        top_msgs = sub.sort_values("rep_score", ascending=False).head(top_messages)
+
+        topic_rows.append(
             {
-                "cluster_id": int(cid),
-                "n_prompts": int(len(grp)),
-                "top_terms": extract_top_terms(grp),
-                "examples": " || ".join(examples),
+                cluster_col: int(cid),
+                "n_messages": int(len(sub)),
+                "top_terms": top_terms,
+                "cluster_document": doc_text,
             }
         )
-    return pd.DataFrame(rows).sort_values("n_prompts", ascending=False)
+
+        for rank, r in enumerate(top_msgs.itertuples(), start=1):
+            rep_rows.append(
+                {
+                    cluster_col: int(cid),
+                    "rank": rank,
+                    "representative_message": r.prompt_text_original,
+                    "representative_message_clean": r.prompt_text_clean,
+                    "rep_score": float(r.rep_score),
+                    "user_id": r.user_id,
+                }
+            )
+
+    return pd.DataFrame(topic_rows), pd.DataFrame(rep_rows)
 
 
-def derive_user_profiles(df_clustered: pd.DataFrame, labels_map: Dict[int, str]) -> pd.DataFrame:
-    valid = df_clustered[df_clustered["cluster_id"] >= 0].copy()
-    counts = (
-        valid.groupby(["user_id", "cluster_id"]).size().rename("count").reset_index()
+def meta_cluster_representatives(reps: pd.DataFrame, config: AnalysisConfig, min_cluster_size: int = 5) -> pd.DataFrame:
+    if reps.empty:
+        return reps.assign(meta_cluster=-1, meta_umap_x=0.0, meta_umap_y=0.0)
+
+    cluster_level = (
+        reps.sort_values("rank")
+        .groupby("cluster_id", as_index=False)
+        .first()[["cluster_id", "representative_message_clean", "representative_message"]]
     )
-    totals = valid.groupby("user_id").size().rename("total_prompts")
-    profile = counts.merge(totals, on="user_id")
-    profile["share"] = profile["count"] / profile["total_prompts"]
 
-    entropy_df = profile.groupby("user_id")["share"].apply(lambda x: float(-(x * np.log2(x + 1e-12)).sum()))
-    diversity_df = counts.groupby("user_id")["cluster_id"].nunique().rename("n_cluster_types")
-    avg_len = (
-        df_clustered.groupby("user_id")["prompt_text_clean"]
-        .apply(lambda x: float(np.mean([len(t) for t in x])))
-        .rename("avg_prompt_len")
+    if len(cluster_level) < min_cluster_size:
+        cluster_level["meta_cluster"] = -1
+        cluster_level["meta_umap_x"] = 0.0
+        cluster_level["meta_umap_y"] = 0.0
+        return cluster_level
+
+    labels, emb_umap = cluster_texts(
+        cluster_level["representative_message_clean"].tolist(),
+        config,
+        min_cluster_size=min_cluster_size,
     )
-
-    pivot = profile.pivot_table(index="user_id", columns="cluster_id", values="share", fill_value=0.0)
-    dom = pivot.idxmax(axis=1).rename("dominant_cluster")
-
-    out = pivot.reset_index().merge(dom, on="user_id").merge(entropy_df.rename("entropy"), on="user_id")
-    out = out.merge(diversity_df, on="user_id").merge(avg_len, on="user_id")
-    out["dominant_cluster_label"] = out["dominant_cluster"].map(lambda x: labels_map.get(int(x), f"Cluster {x}"))
-    return out
-
-
-def cluster_users(user_profiles: pd.DataFrame, random_state: int = 42) -> pd.DataFrame:
-    feature_cols = [c for c in user_profiles.columns if isinstance(c, (int, np.integer))]
-    if len(feature_cols) == 0 or len(user_profiles) < 3:
-        user_profiles["user_type_id"] = -1
-        user_profiles["user_type_label"] = "Insufficient users"
-        return user_profiles
-
-    X = user_profiles[feature_cols].values
-    Xs = StandardScaler().fit_transform(X)
-    k = min(6, max(2, int(np.sqrt(len(user_profiles)))))
-    km = KMeans(n_clusters=k, random_state=random_state, n_init="auto")
-    labels = km.fit_predict(Xs)
-    out = user_profiles.copy()
-    out["user_type_id"] = labels
-
-    names = {}
-    for t, grp in out.groupby("user_type_id"):
-        center = grp[feature_cols].mean().sort_values(ascending=False)
-        topc = int(center.index[0]) if len(center) else -1
-        names[t] = f"Type {t}: dominant Cluster {topc}"
-    out["user_type_label"] = out["user_type_id"].map(names)
-    return out
-
-
-def ensure_columns(df: pd.DataFrame, mapping: Dict[str, str]) -> pd.DataFrame:
-    renamed = df.rename(columns={v: k for k, v in mapping.items() if v})
-    for col in REQUIRED_COLS:
-        if col not in renamed.columns:
-            raise ValueError(f"Missing required mapped column: {col}")
-    return renamed
+    cluster_level["meta_cluster"] = labels
+    cluster_level["meta_umap_x"] = emb_umap[:, 0]
+    cluster_level["meta_umap_y"] = emb_umap[:, 1] if emb_umap.shape[1] > 1 else 0.0
+    return cluster_level
 
 
 def export_df_button(df: pd.DataFrame, label: str, filename: str):
     st.download_button(label, df.to_csv(index=False).encode("utf-8"), file_name=filename, mime="text/csv")
 
 
-st.title("Prompt Profile Analyzer")
-st.caption("CSV-basierte semantische Prompt-Analyse, Clusterbildung und User-Profiling")
+st.title("Message Topic Analyzer")
+st.caption("BERT-basierte Clusteranalyse aller User-Prompts (inkl. Meta-Cluster)")
 
 with st.sidebar:
-    st.header("Clustering konfigurieren")
+    st.header("Konfiguration")
     embedding_model = st.text_input("Embedding-Modell", "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
     umap_neighbors = st.slider("UMAP n_neighbors", 2, 100, 15)
     umap_components = st.slider("UMAP n_components", 2, 10, 2)
-    hdbscan_min_cluster_size = st.slider("HDBSCAN min_cluster_size", 2, 100, 8)
-    min_prompt_length = st.slider("Mindestlänge Prompt", 0, 500, 5)
     lower_case = st.checkbox("Kleinschreibung", value=False)
-    remove_short = st.checkbox("Sehr kurze Prompts entfernen", value=True)
-    use_bertopic = st.checkbox("BERTopic verwenden (wenn verfügbar)", value=False)
-    aggregation_mode = st.selectbox("Aggregationsebene", ["user", "user+session", "user+problem"])
+    remove_empty = st.checkbox("Leere Nachrichten entfernen", value=True)
+    use_bertopic = st.checkbox("BERTopic verwenden (wenn verfügbar)", value=True)
 
 config = AnalysisConfig(
     embedding_model=embedding_model,
     umap_neighbors=umap_neighbors,
     umap_components=umap_components,
-    hdbscan_min_cluster_size=hdbscan_min_cluster_size,
-    min_prompt_length=min_prompt_length,
     lower_case=lower_case,
-    remove_short=remove_short,
+    remove_empty=remove_empty,
     use_bertopic=use_bertopic,
-    aggregation_mode=aggregation_mode,
 )
 
 st.header("1) Daten hochladen")
@@ -263,125 +242,127 @@ if uploaded is not None:
 
     mapping = {}
     cols = [""] + raw.columns.tolist()
-    for required in REQUIRED_COLS + OPTIONAL_COLS:
+    for required in REQUIRED_COLS:
         default = required if required in raw.columns else ""
         mapping[required] = st.selectbox(f"Spalte für {required}", cols, index=cols.index(default) if default in cols else 0)
 
     if st.button("Analyse starten", type="primary"):
         try:
             df = ensure_columns(raw, mapping)
-            for c in OPTIONAL_COLS:
-                if c not in df.columns:
-                    df[c] = np.nan
-
-            clean = clean_dataframe(df, "prompt_text", config.lower_case, config.min_prompt_length, config.remove_short)
+            clean = clean_dataframe(df, "prompt_text", config.lower_case, config.remove_empty)
             if clean.empty:
-                st.error("Nach Bereinigung sind keine Prompts mehr übrig.")
+                st.error("Nach Bereinigung sind keine Nachrichten mehr übrig.")
                 st.stop()
 
-            clustered, emb, emb_umap, topic_model = prompt_clustering(clean, config)
-            summary = build_cluster_summary(clustered)
+            clustered = cluster_all_prompts(clean, config, min_cluster_size=2)
 
+            cluster_summary, reps = build_ctfidf_representatives(
+                clustered,
+                cluster_col="cluster_id",
+                text_col="prompt_text_clean",
+                top_messages=3,
+            )
+
+            meta_clusters = meta_cluster_representatives(reps, config, min_cluster_size=5)
+            reps_meta = reps.merge(meta_clusters[["cluster_id", "meta_cluster", "meta_umap_x", "meta_umap_y"]], on="cluster_id", how="left")
+            reps_meta["meta_cluster"] = reps_meta["meta_cluster"].fillna(-1).astype(int)
+
+            meta_summary, meta_reps = build_ctfidf_representatives(
+                reps_meta.rename(columns={"representative_message_clean": "prompt_text_clean", "representative_message": "prompt_text_original"}),
+                cluster_col="meta_cluster",
+                text_col="prompt_text_clean",
+                top_messages=1,
+            )
+
+            st.session_state["clean"] = clean
             st.session_state["clustered"] = clustered
-            st.session_state["cluster_summary"] = summary
-            st.session_state["manual_labels"] = {int(r.cluster_id): f"Cluster {int(r.cluster_id)}" for r in summary.itertuples()}
+            st.session_state["cluster_summary"] = cluster_summary
+            st.session_state["reps"] = reps_meta
+            st.session_state["meta_summary"] = meta_summary
+            st.session_state["meta_reps"] = meta_reps
+            st.session_state["meta_labels"] = {
+                int(r.meta_cluster): f"Meta-Cluster {int(r.meta_cluster)}" for r in meta_summary.itertuples()
+            }
+            st.session_state["superficial_labels"] = {
+                int(r.meta_cluster): "nicht-superficial" for r in meta_summary.itertuples()
+            }
             st.success("Analyse abgeschlossen.")
         except Exception as e:
             st.exception(e)
 
 if "clustered" in st.session_state:
     clustered = st.session_state["clustered"]
-    summary = st.session_state["cluster_summary"]
-    manual_labels = st.session_state.get("manual_labels", {})
+    cluster_summary = st.session_state["cluster_summary"]
+    reps = st.session_state["reps"]
+    meta_summary = st.session_state["meta_summary"]
+    meta_reps = st.session_state["meta_reps"]
 
-    st.header("3) Prompt-Cluster analysieren")
+    st.header("3) Cluster (alle Prompts)")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Anzahl User", int(clustered["user_id"].nunique()))
+    c2.metric("Anzahl Prompts", int(len(clustered)))
+    c3.metric("Anzahl Cluster", int((cluster_summary["cluster_id"] >= 0).sum()) if not cluster_summary.empty else 0)
 
-    colf1, colf2, colf3 = st.columns(3)
-    with colf1:
-        min_user_prompts = st.number_input("Mindestanzahl Prompts pro User", min_value=1, value=1)
-    with colf2:
-        min_cluster_size_filter = st.number_input("Mindestclustergröße", min_value=1, value=1)
-    with colf3:
-        selected_cluster_filter = st.selectbox("Cluster-Filter", ["Alle"] + sorted(clustered["cluster_id"].astype(str).unique().tolist()))
-
-    dfv = clustered.copy()
-    user_counts = dfv.groupby("user_id").size()
-    keep_users = user_counts[user_counts >= min_user_prompts].index
-    dfv = dfv[dfv["user_id"].isin(keep_users)]
-    cluster_counts = dfv["cluster_id"].value_counts()
-    keep_clusters = cluster_counts[cluster_counts >= min_cluster_size_filter].index
-    dfv = dfv[dfv["cluster_id"].isin(keep_clusters)]
-    if selected_cluster_filter != "Alle":
-        dfv = dfv[dfv["cluster_id"].astype(str) == selected_cluster_filter]
-
-    fig_scatter = px.scatter(
-        dfv,
+    fig_cluster = px.scatter(
+        clustered,
         x="umap_x",
         y="umap_y",
-        color=dfv["cluster_id"].astype(str),
-        hover_data=["user_id", "prompt_text_original", "cluster_id", "session", "treatment_arm", "grade", "problem_id"],
-        title="UMAP-Scatter der Einzelprompts nach Cluster",
+        color=clustered["cluster_id"].astype(str),
+        hover_data=["user_id", "prompt_text_original", "cluster_id"],
+        title="UMAP-Cluster aller Prompts",
     )
-    st.plotly_chart(fig_scatter, use_container_width=True)
+    st.plotly_chart(fig_cluster, use_container_width=True)
 
-    fig_bar = px.bar(summary, x="cluster_id", y="n_prompts", title="Clustergrößen")
-    st.plotly_chart(fig_bar, use_container_width=True)
+    st.dataframe(cluster_summary.sort_values("n_messages", ascending=False), use_container_width=True)
+    st.subheader("Top-3 repräsentative Nachrichten je Cluster")
+    st.dataframe(reps[["cluster_id", "meta_cluster", "rank", "representative_message", "user_id"]], use_container_width=True)
 
-    st.subheader("Clusterübersicht")
-    editable = summary.copy()
-    editable["manual_label"] = editable["cluster_id"].map(lambda x: manual_labels.get(int(x), f"Cluster {int(x)}"))
-    edited = st.data_editor(editable, use_container_width=True, num_rows="fixed")
+    st.header("4) Meta-Cluster")
+    fig_meta = px.scatter(
+        reps.drop_duplicates("cluster_id"),
+        x="meta_umap_x",
+        y="meta_umap_y",
+        color=reps.drop_duplicates("cluster_id")["meta_cluster"].astype(str),
+        hover_data=["cluster_id", "representative_message"],
+        title="Meta-Clustering auf Cluster-Repräsentanten",
+    )
+    st.plotly_chart(fig_meta, use_container_width=True)
 
-    new_labels = {int(r["cluster_id"]): r["manual_label"] for _, r in edited.iterrows()}
-    st.session_state["manual_labels"] = new_labels
+    editable_meta = meta_summary.copy()
+    meta_labels = st.session_state.get("meta_labels", {})
+    superficial_labels = st.session_state.get("superficial_labels", {})
+    editable_meta["message_type"] = editable_meta["meta_cluster"].map(lambda x: meta_labels.get(int(x), f"Meta-Cluster {int(x)}"))
+    editable_meta["superficial_flag"] = editable_meta["meta_cluster"].map(lambda x: superficial_labels.get(int(x), "nicht-superficial"))
+    edited_meta = st.data_editor(editable_meta, use_container_width=True, num_rows="fixed")
 
-    st.header("4) User-Profile analysieren")
-    profiles = derive_user_profiles(clustered, new_labels)
-    profiles = cluster_users(profiles)
-    st.session_state["user_profiles"] = profiles
+    st.session_state["meta_labels"] = {int(r["meta_cluster"]): r["message_type"] for _, r in edited_meta.iterrows()}
+    st.session_state["superficial_labels"] = {int(r["meta_cluster"]): r["superficial_flag"] for _, r in edited_meta.iterrows()}
 
-    st.dataframe(profiles, use_container_width=True)
+    meta_top = meta_reps.copy()
+    meta_top["message_type"] = meta_top["meta_cluster"].map(st.session_state["meta_labels"])
+    meta_top["superficial_flag"] = meta_top["meta_cluster"].map(st.session_state["superficial_labels"])
+    st.dataframe(meta_top[["meta_cluster", "representative_message", "message_type", "superficial_flag"]], use_container_width=True)
 
-    user_list = sorted(profiles["user_id"].astype(str).tolist())
-    selected_user = st.selectbox("User auswählen", user_list)
-    if selected_user:
-        uid = selected_user
-        sub = clustered[clustered["user_id"].astype(str) == uid]
-        dist = sub["cluster_id"].value_counts().reset_index()
-        dist.columns = ["cluster_id", "count"]
-        dist["label"] = dist["cluster_id"].map(lambda x: new_labels.get(int(x), f"Cluster {int(x)}"))
-        fig_user = px.bar(dist, x="label", y="count", title=f"Clusterprofil User {uid}")
-        st.plotly_chart(fig_user, use_container_width=True)
-        st.write("Typische User-Prompts:")
-        st.dataframe(sub[["timestamp", "prompt_text_original", "cluster_id"]].head(20), use_container_width=True)
+    st.header("5) Export")
+    export_df_button(clustered, "Prompts mit Clusterzuordnung (CSV)", "prompts_with_clusters.csv")
+    export_df_button(cluster_summary, "Cluster-Summary (CSV)", "cluster_summary.csv")
+    export_df_button(reps, "Cluster-Repräsentanten (CSV)", "cluster_representatives.csv")
+    export_df_button(meta_summary, "Meta-Cluster-Summary (CSV)", "meta_cluster_summary.csv")
+    export_df_button(meta_top, "Meta-Repräsentanten (CSV)", "meta_representatives.csv")
 
-    st.header("5) User-Typen (zweites Clustering)")
-    type_counts = profiles["user_type_label"].value_counts().reset_index()
-    type_counts.columns = ["user_type", "n_users"]
-    fig_types = px.bar(type_counts, x="user_type", y="n_users", title="Verteilung der User-Typen")
-    st.plotly_chart(fig_types, use_container_width=True)
-
-    st.header("6) Export")
-    c1, c2 = st.columns(2)
-    with c1:
-        export_df_button(clustered, "Prompts mit Clusterzuordnung (CSV)", "prompts_with_clusters.csv")
-        export_df_button(summary, "Clusterübersicht (CSV)", "cluster_overview.csv")
-        export_df_button(profiles, "User-Profile inkl. User-Typen (CSV)", "user_profiles.csv")
-    with c2:
-        labels_df = pd.DataFrame([{"cluster_id": k, "manual_label": v} for k, v in new_labels.items()])
-        export_df_button(labels_df, "Manuelle Clusterlabels (CSV)", "cluster_labels.csv")
-
-        export_payload = {
-            "cluster_labels": new_labels,
-            "cluster_summary": summary.to_dict(orient="records"),
-            "user_profiles": profiles.to_dict(orient="records"),
-        }
-        st.download_button(
-            "Gesamtergebnis als JSON",
-            data=json.dumps(export_payload, ensure_ascii=False, indent=2),
-            file_name="prompt_profile_analysis.json",
-            mime="application/json",
-        )
-
+    export_payload = {
+        "cluster_summary": cluster_summary.to_dict(orient="records"),
+        "cluster_representatives": reps.to_dict(orient="records"),
+        "meta_cluster_summary": meta_summary.to_dict(orient="records"),
+        "meta_representatives": meta_top.to_dict(orient="records"),
+        "meta_labels": st.session_state["meta_labels"],
+        "superficial_labels": st.session_state["superficial_labels"],
+    }
+    st.download_button(
+        "Gesamtergebnis als JSON",
+        data=json.dumps(export_payload, ensure_ascii=False, indent=2),
+        file_name="message_topic_analysis.json",
+        mime="application/json",
+    )
 else:
     st.info("Bitte eine CSV hochladen und die Analyse starten.")

@@ -1,26 +1,32 @@
-# Prompt Profile Analyzer
+# Message Topic Analyzer
 
-Lokale, browserbasierte Streamlit-App zur Analyse von Prompt-Daten aus CSV-Dateien.
+Lokale Streamlit-App zur **BERT-basierten Clusteranalyse von User-Prompts**.
+
+## Fokus der App
+
+Die App ist jetzt bewusst reduziert auf CSV-Dateien mit nur zwei relevanten Feldern:
+
+- `user_id`
+- `prompt_text`
+
+Alle Prompts eines Users werden berücksichtigt (keine Problem-/Session-Filterung erforderlich).
+
+## Workflow
+
+1. Bereinigung der Prompt-Texte (Whitespace, optional lowercase, optional Entfernen leerer Prompts)
+2. Clustering über **alle Prompts** mit Sentence-BERT + UMAP + HDBSCAN (optional BERTopic)
+3. c-TF-IDF-Auswertung pro Cluster mit Top-Termen und Top-3 repräsentativen Nachrichten
+4. Optionales Meta-Clustering der Cluster-Repräsentanten
+5. Manuelles Labeling der Meta-Cluster (`message_type`, `superficial_flag`)
+6. CSV/JSON-Export
 
 ## Features
 
-- CSV-Upload (Dateiauswahl) mit Datenvorschau
-- Flexible Spaltenzuordnung (`user_id`, `timestamp`, `prompt_text` + optionale Felder)
-- Datenbereinigung (Whitespace, optional lower-case, Mindestlänge)
-- Semantisches Clustering einzelner Prompts mit:
-  - `sentence-transformers` Embeddings
-  - `UMAP` Reduktion
-  - `HDBSCAN` Clustering
-  - optional BERTopic-Workflow mit Fallback
-- User-Profiling auf Basis von Clusterverteilungen:
-  - absolute/relative Clusterhäufigkeiten
-  - dominante Cluster
-  - Entropie/Diversität
-  - durchschnittliche Promptlänge
-- Optionales zweites Clustering auf User-Ebene (User-Typen)
-- Interaktive Visualisierungen mit Plotly
-- Manuelles Labeling der Cluster
-- Export als CSV und JSON
+- CSV-Upload + einfache Spaltenzuordnung nur für `user_id` und `prompt_text`
+- Interaktive UMAP-Visualisierungen für Cluster und Meta-Cluster
+- Repräsentative Nachrichten pro Cluster
+- Editierbares Meta-Labeling
+- Export aller zentralen Ergebnistabellen
 
 ## Projektstruktur
 
@@ -42,34 +48,8 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-Die App läuft dann lokal (meist unter `http://localhost:8501`).
+Danach läuft die App lokal (typisch `http://localhost:8501`).
 
-## Datenformat
+## Hinweis
 
-Mindestens diese Spalten werden benötigt:
-
-- `user_id`
-- `timestamp`
-- `prompt_text`
-
-Optional:
-
-- `session`
-- `treatment_arm`
-- `grade`
-- `problem_id`
-- `response_text`
-- `conversation_id`
-
-## Methodik in Kurzform
-
-1. Einzelprompts werden bereinigt und eingebettet.
-2. Prompts werden mit UMAP+HDBSCAN semantisch geclustert (optional BERTopic).
-3. Aus Prompt-Clustern wird pro User eine Clusterverteilung abgeleitet.
-4. Daraus entstehen datengetriebene User-Profile und optional User-Typen.
-
-## Hinweise
-
-- Für deutschsprachige Daten ist standardmäßig ein multilinguales Modell voreingestellt.
-- Bei sehr großen Datensätzen kann die Berechnung mehrere Minuten dauern.
-- Falls BERTopic in der Laufzeitumgebung nicht korrekt verfügbar ist, nutzt die App automatisch den Fallback-Workflow.
+Falls BERTopic in der Umgebung nicht verfügbar ist, läuft automatisch der UMAP+HDBSCAN-Workflow weiter.
